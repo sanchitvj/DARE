@@ -196,3 +196,5 @@ cython_debug/
 .idea
 __pycache__/
 .vscode/
+
+**/*.pkg

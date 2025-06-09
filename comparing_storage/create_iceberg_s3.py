@@ -1,170 +1,142 @@
 """
-PySpark script to create an Apache Iceberg table in a standard S3 bucket.
+PySpark script to create or append to an Apache Iceberg table on EMR.
 
-This script performs the following actions:
-1.  Initializes a Spark Session with configurations for Apache Iceberg and AWS Glue
-    Data Catalog.
-2.  Reads a source Parquet dataset from an S3 bucket.
-3.  Writes the data into a new or existing Iceberg table, partitioned by year and quarter.
-4.  The Iceberg table's metadata is managed by the AWS Glue Data Catalog, and its
-    data files are stored in a specified S3 warehouse location.
+This script is designed to run on a distributed Spark cluster (like EMR)
+and handles complex data ingestion scenarios involving messy source directories
+and evolving schemas.
 
-Prerequisites:
-- A running Spark environment (e.g., on an EC2 instance) with Spark 4.0.
-- AWS credentials configured in the environment where Spark is running, with
-  permissions for S3 (read/write) and AWS Glue (create/update tables/databases).
-- The source Parquet data should be available in the specified S3 path.
+Core Logic:
+1.  **Manifest-Driven Ingestion:** Instead of scanning unpredictable source
+    directories, this script reads a pre-generated 'manifest' file. This
+    manifest is a simple CSV that maps every source data file to its correct
+    partitioning keys (e.g., year, quarter).
+2.  **Batch Processing:** It processes the source files in logical batches,
+    grouped by year and quarter from the manifest. This makes the ingestion
+    process more reliable and easier to debug.
+3.  **Schema Evolution:** The script's primary strength is its ability to
+    handle changing source schemas over time. By using Iceberg's `mergeSchema`
+    capability, it can unify disparate CSV files into a single, cohesive
+    table. New columns are added automatically, with `null` values backfilled
+    for older data.
+4.  **Idempotent Writes:** It uses an 'overwrite' mode for the first batch
+    and 'append' for all subsequent batches, making the job idempotent and
+    safe to re-run.
 
-Usage:
-    spark-submit --packages org.apache.iceberg:iceberg-spark-runtime-4.0_2.12:1.5.0,org.apache.iceberg:iceberg-aws-bundle:1.5.0 \\
+Usage on EMR:
+    spark-submit --deploy-mode cluster \\
+        --packages org.apache.iceberg:iceberg-spark-runtime-3.4_2.12:1.5.0,org.apache.iceberg:iceberg-aws-bundle:1.5.0 \\
         create_iceberg_s3.py \\
-        --warehouse-path s3a://your-iceberg-s3-warehouse-bucket/warehouse \\
-        --source-path s3a://your-source-data-bucket/path/to/parquet-data \\
+        --warehouse-path s3a://your-iceberg-warehouse/ \\
+        --manifest-path s3a://your-manifest-bucket/manifests/source_manifest.csv \\
         --catalog-name glue_catalog \\
-        --db-name iceberg_benchmark_db \\
-        --table-name s3_standard_table \\
-        --partition-cols year,quarter
-
+        --db-name your_db \\
+        --table-name your_table
 """
 
 import argparse
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import input_file_name, regexp_extract
+from pyspark.sql import SparkSession, functions as F
 
 def parse_arguments():
-    """
-    Parses command-line arguments for the script.
-
-    Returns:
-        argparse.Namespace: The parsed arguments.
-    """
-    parser = argparse.ArgumentParser(description="Create an Iceberg table on S3 from Parquet data.")
-    parser.add_argument("--warehouse-path", type=str, required=True,
-                        help="S3 path for the Iceberg warehouse (e.g., s3a://your-bucket/warehouse)")
-    parser.add_argument("--source-path", type=str, required=True,
-                        help="S3 path to the source Parquet dataset (e.g., s3a://your-bucket/data)")
-    parser.add_argument("--catalog-name", type=str, default="glue_catalog",
-                        help="Name of the Iceberg catalog (default: glue_catalog)")
-    parser.add_argument("--db-name", type=str, required=True,
-                        help="Name of the database in the catalog (e.g., iceberg_benchmark_db)")
-    parser.add_argument("--table-name", type=str, required=True,
-                        help="Name of the Iceberg table to create (e.g., s3_standard_table)")
-    parser.add_argument("--partition-cols", type=str, default="year,quarter",
-                        help="Comma-separated list of column names to partition the table by (e.g., year,quarter)")
-
-    args = parser.parse_args()
-    # Split the partition columns string into a list.
-    args.partition_cols = [col.strip() for col in args.partition_cols.split(",")]
-    return args
+    """Parses command-line arguments for the script."""
+    parser = argparse.ArgumentParser(description="Create an Iceberg table on S3 from a manifest file.")
+    parser.add_argument("--warehouse-path", required=True, help="S3 path for the Iceberg warehouse.")
+    parser.add_argument("--manifest-path", required=True, help="S3 path to the manifest CSV file.")
+    parser.add_argument("--catalog-name", default="glue_catalog", help="Name of the Iceberg catalog.")
+    parser.add_argument("--db-name", required=True, help="Name of the database in the catalog.")
+    parser.add_argument("--table-name", required=True, help="Name of the Iceberg table to create.")
+    return parser.parse_args()
 
 def main():
-    """
-    Main function to create and run the Spark job for creating an Iceberg table on S3.
-    """
+    """Main function to create and run the Spark job."""
     args = parse_arguments()
-    print("Starting Spark job to create Iceberg table on S3.")
-    print(f"Arguments received: {args}")
+    table_identifier = f"{args.catalog_name}.{args.db_name}.{args.table_name}"
 
+    # Standard Spark configuration for an EMR cluster environment.
+    # No need for aggressive single-node memory tuning.
     spark = (
-        SparkSession.builder.appName("S3-Standard-Iceberg-Creation")
-        # --- Iceberg SQL Extensions ---
+        SparkSession.builder.appName(f"Iceberg Ingestion for {args.table_name}")
         .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
-        # --- Iceberg Catalog Configuration (for AWS Glue) ---
-        # Use SparkCatalog as the main entry point and specify Glue for the implementation
-        .config(
-            f"spark.sql.catalog.{args.catalog_name}",
-            "org.apache.iceberg.spark.SparkCatalog"
-        )
-        .config(
-            f"spark.sql.catalog.{args.catalog_name}.catalog-impl",
-            "org.apache.iceberg.aws.glue.GlueCatalog",
-        )
-        .config(
-            f"spark.sql.catalog.{args.catalog_name}.warehouse", args.warehouse_path
-        )
-        .config(
-            f"spark.sql.catalog.{args.catalog_name}.io-impl",
-            "org.apache.iceberg.aws.s3.S3FileIO",
-        )
-        # --- Performance Tuning for a single c5.4xlarge node (16 vCPU, 32GB RAM) ---
-        # This configuration assumes a standalone Spark cluster on the single node.
-        .config("spark.driver.memory", "20g")
-        .config("spark.executor.memory", "20g")
-        # Leave a couple of cores for the OS and the Spark driver process
-        .config("spark.executor.cores", "14")
-        .config("spark.sql.shuffle.partitions", "200")  # Good starting point for 110GB
+        .config(f"spark.sql.catalog.{args.catalog_name}", "org.apache.iceberg.spark.SparkCatalog")
+        .config(f"spark.sql.catalog.{args.catalog_name}.catalog-impl", "org.apache.iceberg.aws.glue.GlueCatalog")
+        .config(f"spark.sql.catalog.{args.catalog_name}.warehouse", args.warehouse_path)
+        .config(f"spark.sql.catalog.{args.catalog_name}.io-impl", "org.apache.iceberg.aws.s3.S3FileIO")
         .getOrCreate()
     )
 
-    print("Spark session created successfully with Iceberg support.")
+    print("Spark session created with Iceberg support for EMR.")
+    print(f"Target Iceberg table: {table_identifier}")
 
-    # 1. Create the database in AWS Glue Data Catalog if it doesn't exist
+    # 1. Create the database if it doesn't exist
     spark.sql(f"CREATE DATABASE IF NOT EXISTS {args.catalog_name}.{args.db_name}")
-    print(f"Database '{args.db_name}' is ready in catalog '{args.catalog_name}'.")
+    print(f"Database '{args.db_name}' is ready.")
 
-    # 2. Read the source Parquet data from S3
-    # print(f"Reading Parquet data from: {args.source_path}")
+    # 2. Read the manifest file
     try:
-        # Use a glob path pattern to be specific about which files to read.
-        # This helps Spark find the files in the nested directory structure.
-        source_df = spark.read.parquet(f"{args.source_path}/*/*/*.parquet")
-
-        # Since partition columns (year, quarter) are in the file path and not in the
-        # data itself, we must extract them to create new columns in the DataFrame.
-        # This is necessary for the .partitionBy() step later.
-        print("Extracting partition columns from file path...")
-        # The regex patterns below assume a path structure like '.../2023/q1/some-file.parquet'
-        source_df = source_df.withColumn("input_file", input_file_name()) \
-            .withColumn("year", regexp_extract("input_file", r"/(\d{4})/", 1)) \
-            .withColumn("quarter", regexp_extract("input_file", r"/(q\d)/", 1)) \
-            .drop("input_file")
-
-        print("Successfully read source data. Schema with new partition columns:")
-        source_df.printSchema()
-        print(f"Total rows read from source: {source_df.count()}")
+        manifest_df = spark.read.option("header", "true").csv(args.manifest_path)
+        print(f"Successfully read manifest file from {args.manifest_path}")
+        # Group files by year and quarter to process them in logical batches
+        batches = manifest_df.groupBy("year", "quarter").agg(F.collect_list("file_path").alias("files"))
+        batches.persist() # Persist because we iterate over it
+        print(f"Found {batches.count()} batches to process.")
     except Exception as e:
-        print(f"Error reading from source S3 path: {args.source_path}")
-        print("Please check if the path is correct and you have the necessary permissions.")
-        print(f"Error details: {e}")
+        print(f"Error reading manifest file: {args.manifest_path}")
+        print(f"Please ensure the file exists and is accessible. Details: {e}")
         spark.stop()
         return
 
+    # 3. Iteratively process each batch and write to Iceberg
+    is_first_batch = True
+    # Collect batches to the driver to control the loop. This is safe because the number
+    # of batches (year/quarter combinations) is small.
+    for row in batches.collect():
+        year, quarter, files = row['year'], row['quarter'], row['files']
+        write_mode = "overwrite" if is_first_batch else "append"
 
-    # 3. Write the DataFrame to an Iceberg table
-    table_identifier = f"{args.catalog_name}.{args.db_name}.{args.table_name}"
-    print(f"Writing data to Iceberg table: {table_identifier}")
+        print(f"\\n--- Processing Batch: Year={year}, Quarter={quarter} (Mode: {write_mode}) ---")
+        print(f"Found {len(files)} files in this batch.")
 
-    # Partitioning is crucial for query performance. Use the columns provided via args.
+        try:
+            # Read all CSV files for the current batch
+            # header=true and inferSchema=true are crucial for handling different file structures
+            batch_df = spark.read.option("header", "true").option("inferSchema", "true").csv(files)
+
+            # The year and quarter are constant for the batch, so add them as columns
+            batch_df = batch_df.withColumn("year", F.lit(year)).withColumn("quarter", F.lit(quarter))
+
+            print("Writing data to Iceberg table...")
+            (
+                batch_df.write.format("iceberg")
+                .mode(write_mode)
+                .option("mergeSchema", "true")  # THIS IS THE KEY for handling schema evolution
+                .option("write.spark.fanout.enabled", "true")
+                .partitionBy("year", "quarter")
+                .saveAsTable(table_identifier)
+            )
+            print("Successfully wrote batch to Iceberg.")
+            is_first_batch = False
+
+        except Exception as e:
+            print(f"ERROR: Failed to process batch for Year={year}, Quarter={quarter}.")
+            print(f"Full error details: {e}")
+            # Optionally, you could add logic here to skip the batch and continue
+            batches.unpersist()
+            spark.stop()
+            return
+
+    batches.unpersist()
+    print("\\nAll batches processed successfully.")
+
+    # 4. Final verification
+    print("--- Verification Step ---")
     try:
-        (
-            source_df.write.format("iceberg")
-            .mode("overwrite") # Use "overwrite" to recreate the table, or "append" to add data
-            .partitionBy(*args.partition_cols) # Use the partition columns from args
-            .save(table_identifier)
-        )
-        print(f"Successfully wrote data to Iceberg table '{table_identifier}'.")
+        final_df = spark.table(table_identifier)
+        print(f"Final schema of table '{table_identifier}':")
+        final_df.printSchema()
+        print(f"Total rows in table: {final_df.count()}")
     except Exception as e:
-        print(f"Error writing to Iceberg table '{table_identifier}'.")
-        print(f"This could be due to partitioning columns {args.partition_cols} not existing in the DataFrame.")
-        print(f"Error details: {e}")
-        spark.stop()
-        return
+        print(f"Could not perform final verification. Error: {e}")
 
-    # 4. (Optional) Read from the Iceberg table to verify the write operation
-    print("\nVerification step: Reading data back from the Iceberg table.")
-    try:
-        iceberg_df = spark.table(table_identifier)
-        print(f"Successfully read from '{table_identifier}'.")
-        print(f"Verification count: {iceberg_df.count()} rows.")
-        print("Showing a sample of 5 rows from the Iceberg table:")
-        iceberg_df.show(5)
-    except Exception as e:
-        print(f"Could not verify by reading from the Iceberg table. Error: {e}")
-
-
-    print("\nSpark job finished.")
     spark.stop()
-
 
 if __name__ == "__main__":
     main() 
