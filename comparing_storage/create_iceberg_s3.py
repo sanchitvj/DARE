@@ -46,8 +46,27 @@ def parse_arguments():
     parser.add_argument("--table-name", required=True, help="Name of the Iceberg table to create.")
     return parser.parse_args()
 
+def get_unified_schema(spark, file_paths):
+    """
+    Reads a sample of files to create a single, unified schema that can
+    accommodate all data variations across all files. This is more robust
+    than inferring the schema for each batch individually.
+    """
+    print("--- Generating a unified schema from all source files ---")
+    # To avoid reading all data, which can be slow, we can sample the files.
+    # However, for maximum safety with a reasonable number of files, we read the schema from all.
+    # Spark is efficient and reads only footers/headers where possible.
+    
+    # Read all files with schema inference enabled to capture all columns and types
+    unified_df = spark.read.option("header", "true").option("inferSchema", "true").csv(file_paths)
+    
+    print("Unified schema generated successfully.")
+    unified_df.printSchema()
+    return unified_df.schema
+
 def main():
     """Main function to create and run the Spark job."""
+    print("--- RUNNING SCRIPT VERSION 2.0 WITH SCHEMA ALIGNMENT LOGIC ---")
     args = parse_arguments()
     table_identifier = f"{args.catalog_name}.{args.db_name}.{args.table_name}"
 
@@ -60,6 +79,8 @@ def main():
         .config(f"spark.sql.catalog.{args.catalog_name}.catalog-impl", "org.apache.iceberg.aws.glue.GlueCatalog")
         .config(f"spark.sql.catalog.{args.catalog_name}.warehouse", args.warehouse_path)
         .config(f"spark.sql.catalog.{args.catalog_name}.io-impl", "org.apache.iceberg.aws.s3.S3FileIO")
+        # Enable automatic schema evolution (e.g., INT -> BIGINT promotion)
+        .config("spark.sql.iceberg.schema-evolution.enabled", "true")
         .getOrCreate()
     )
 
@@ -84,7 +105,11 @@ def main():
         spark.stop()
         return
 
-    # 3. Iteratively process each batch and write to Iceberg
+    # 3. Proactively create a unified schema before processing any data
+    all_file_paths = [row.file_path for row in manifest_df.select("file_path").collect()]
+    unified_schema = get_unified_schema(spark, all_file_paths)
+
+    # 4. Iteratively process each batch and write to Iceberg
     is_first_batch = True
     # Collect batches to the driver to control the loop. This is safe because the number
     # of batches (year/quarter combinations) is small.
@@ -96,18 +121,22 @@ def main():
         print(f"Found {len(files)} files in this batch.")
 
         try:
-            # Read all CSV files for the current batch
-            # header=true and inferSchema=true are crucial for handling different file structures
-            batch_df = spark.read.option("header", "true").option("inferSchema", "true").csv(files)
+            # Read all CSV files for the current batch using the master schema
+            # This ensures every batch has the same structure, preventing type mismatches.
+            batch_df = spark.read.option("header", "true").schema(unified_schema).csv(files)
 
             # The year and quarter are constant for the batch, so add them as columns
             batch_df = batch_df.withColumn("year", F.lit(year)).withColumn("quarter", F.lit(quarter))
+
+            # The schema alignment logic for missing columns is no longer needed
+            # because we are enforcing the unified schema at read time.
 
             print("Writing data to Iceberg table...")
             (
                 batch_df.write.format("iceberg")
                 .mode(write_mode)
-                .option("mergeSchema", "true")  # THIS IS THE KEY for handling schema evolution
+                # mergeSchema is still good practice for future-proofing
+                .option("mergeSchema", "true")
                 .option("write.spark.fanout.enabled", "true")
                 .partitionBy("year", "quarter")
                 .saveAsTable(table_identifier)
@@ -126,7 +155,7 @@ def main():
     batches.unpersist()
     print("\\nAll batches processed successfully.")
 
-    # 4. Final verification
+    # 5. Final verification
     print("--- Verification Step ---")
     try:
         final_df = spark.table(table_identifier)
