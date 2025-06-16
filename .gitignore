@@ -198,3 +198,7 @@ __pycache__/
 .vscode/
 
 **/*.pkg
+
+**test/**
+
+**cursor/**
