@@ -202,3 +202,14 @@ __pycache__/
 **test/**
 
 **cursor/**
+
+**/*.csv
+**/*.json
+**/*.parquet
+**/*.avro
+**/*.orc
+**/*.parquet
+**/*.avro
+**/*.orc
+
+**/.DS_Store

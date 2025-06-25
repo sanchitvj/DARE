@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Clean R2 bucket completely before fresh migration
 """
@@ -20,7 +19,7 @@ def clean_r2_bucket():
     access_key = os.getenv('R2_ACCESS_KEY_ID')
     secret_key = os.getenv('R2_SECRET_ACCESS_KEY')
     account_id = os.getenv('CLOUDFLARE_ACCOUNT_ID')
-    bucket_name = os.getenv('R2_BUCKET_NAME', 'hdd-iceberg-r2')
+    bucket_name = os.getenv('R2_BUCKET_NAME')
     
     if not all([access_key, secret_key, account_id]):
         logger.error("❌ Missing required environment variables:")
@@ -39,10 +38,10 @@ def clean_r2_bucket():
             region_name='auto'
         )
         
-        logger.info(f"🧹 Starting to clean R2 bucket: {bucket_name}")
+        logger.info(f"Starting to clean R2 bucket: {bucket_name}")
         
         # List all objects
-        logger.info("📋 Listing all objects in bucket...")
+        logger.info("Listing all objects in bucket...")
         paginator = s3_client.get_paginator('list_objects_v2')
         pages = paginator.paginate(Bucket=bucket_name)
         
@@ -78,12 +77,12 @@ def clean_r2_bucket():
                         for error in response['Errors']:
                             logger.error(f"❌ Error deleting {error['Key']}: {error['Message']}")
         
-        logger.info("🎉 Bucket cleaning completed!")
+        logger.info("Bucket cleaning completed!")
         logger.info(f"   Total objects found: {total_objects}")
         logger.info(f"   Objects deleted: {deleted_objects}")
         
         # Verify bucket is empty
-        logger.info("🔍 Verifying bucket is empty...")
+        logger.info("Verifying bucket is empty...")
         response = s3_client.list_objects_v2(Bucket=bucket_name, MaxKeys=1)
         
         if 'Contents' not in response:
@@ -98,7 +97,7 @@ def clean_r2_bucket():
         return False
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting R2 bucket cleanup...")
+    logger.info("Starting R2 bucket cleanup...")
     success = clean_r2_bucket()
     
     if success:
