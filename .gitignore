@@ -213,3 +213,7 @@ __pycache__/
 **/*.orc
 
 **/.DS_Store
+
+**term.md**
+**s3_to_r2_log.md**
+**untitled.png**

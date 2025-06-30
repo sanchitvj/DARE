@@ -1,5 +1,5 @@
 """
-DuckDB script to create Apache Iceberg tables on Cloudflare R2 from S3 source data.
+DuckDB script to create parquet hive-partitioned tables on Cloudflare R2 from S3 source data.
 
 This script leverages DuckDB's high-performance CSV reading and Iceberg writing
 capabilities to handle large datasets (600M+ rows) with schema evolution and
