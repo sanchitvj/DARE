@@ -14,7 +14,7 @@ This repository serves as a testing ground for:
 - **ETL/ELT Patterns**: Cross-language performance benchmarking
 - **Data Migration**: Between different storage and catalog systems
 
-## 📚 Articles & Experiments
+## Articles & Experiments
 
 | S.No. | Title | Summary |
 |-------|-------|---------|
