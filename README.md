@@ -14,18 +14,10 @@ This repository serves as a testing ground for:
 - **ETL/ELT Patterns**: Cross-language performance benchmarking
 - **Data Migration**: Between different storage and catalog systems
 
+## 📚 Articles & Experiments
 
-## Quick Start
+| S.No. | Title | Summary |
+|-------|-------|---------|
+| 1 | [DARE #1: Migrating Iceberg Data from S3 to S3 Tables with EMR Spark](https://medium.com/@sanchitvj/dare-1-migrating-iceberg-data-from-s3-to-s3-tables-with-emr-spark-11677335ead6) | This article is the first of my DARE series, where I will share an experiment on how to move Apache Iceberg tables from standard S3 to S3 Tables using a Spark job in an EMR cluster. |
+| 2 | [DARE #2: Cross-cloud storage adventure S3 🤝 R2](https://blog.dataengineerthings.org/dare-2-cross-cloud-storage-adventure-s3-r2-d68ed61faece) | This is the second article in my DARE series, where I will share how to move data between S3 and R2 using Spark (don’t be afraid, not EMR this time - I know the reaction when readers see “I…used EMR cluster!!… for my experiment”.) |
 
-Each experiment directory contains its own implementation with specific setup instructions. Focus areas include:
-
-- **Reproducibility**: All experiments include clear setup and execution steps
-- **Performance Metrics**: Benchmarking data and cost analysis included
-- **Real-world Scenarios**: Practical use cases rather than toy examples
-
-## Key Focus Areas
-
-- Cost-effective cloud storage strategies
-- Query performance optimization
-- Operational overhead analysis
-- Cross-platform compatibility testing
